@@ -4,6 +4,7 @@ function App() {
   const [isRunning, setIsRunning] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [audioContext, setAudioContext] = useState(null);
+  const [initializing, setIsInitializing] = useState(false);
   const [analyser, setAnalyser] = useState(null);
   const wsRef = useRef(null);
   const canvasRef = useRef(null);
@@ -14,8 +15,8 @@ function App() {
   const audioDataRef = useRef([]);
   const messagesEndRef = useRef(null);
   const animationRef = useRef(null);
-  const width = 400;
-  const height = 400;
+  const width = 300;
+  const height = 300;
 
   // Store audio context and related variables in a ref to persist across renders
   const audioRef = useRef({
@@ -25,123 +26,112 @@ function App() {
     baseRadius: 100,
     lastFrame: 0,
     fps: 30,
-    hue1: 0,
-    hue2: 180,
+    hue1: 210,
+    hue2: 240,
   });
 
-  const getAverageVolume = () => {
-    const { analyser, dataArray } = audioRef.current;
-    if (!analyser || !dataArray) return 0;
-    
-    analyser.getByteFrequencyData(dataArray);
-    
-    const start = Math.floor(dataArray.length * 0.1);
-    const end = Math.floor(dataArray.length * 0.7);
-    
-    let sum = 0;
-    for (let i = start; i < end; i++) {
-      sum += dataArray[i];
-    }
-    
-    const average = sum / (end - start);
-    setDebug(`Volume: ${average.toFixed(2)}`);
-    return average;
-  };
+  useEffect(() => {
+    let audioCtx, analyserNode;
 
-  const animate = (timestamp) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyserNode = audioCtx.createAnalyser();
+    analyserNode.fftSize = 1024;
 
-    const ctx = canvas.getContext('2d');
-    const { baseRadius, lastFrame, fps, hue1, hue2 } = audioRef.current;
-    const centerX = canvas.width / 2;
-    const centerY = canvas.height / 2;
-    const twoPi = Math.PI * 2;
-    const maxRadius = baseRadius + 100;
-
-    if (timestamp - lastFrame > 1000/fps) {
-      ctx.clearRect(
-        centerX - maxRadius,
-        centerY - maxRadius,
-        maxRadius * 2,
-        maxRadius * 2
-      );
-      
-      const gradient = ctx.createLinearGradient(0, 0, 400, 300);
-      gradient.addColorStop(0, `hsl(${audioRef.current.hue1}, 100%, 65%)`);
-      gradient.addColorStop(0.5, `hsl(${(audioRef.current.hue1 + 90) % 360}, 100%, 60%)`);
-      gradient.addColorStop(1, `hsl(${audioRef.current.hue2}, 100%, 65%)`);
-      
-      audioRef.current.hue1 = (audioRef.current.hue1 + 2) % 360;
-      audioRef.current.hue2 = (audioRef.current.hue2 + 2) % 360;
-      
-      ctx.fillStyle = gradient;
-      ctx.fillRect(0, 0, 400, 300);
-      
-      ctx.globalCompositeOperation = 'destination-in';
-      
-      let radius = baseRadius;
-      if (audioRef.current.analyser) {
-        const volume = getAverageVolume();
-        radius = baseRadius + (volume / 128) * 100;
-      }
-      
-      ctx.beginPath();
-      ctx.arc(centerX, centerY, radius, 0, twoPi);
-      ctx.fill();
-      
-      ctx.globalCompositeOperation = 'source-over';
-      
-      audioRef.current.lastFrame = timestamp;
-    }
-    
-    requestAnimationFrame(animate);
-  };
-
-  const initAudio = async () => {
-    try {
-      setIsInitializing(true);
-      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: {
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false
-        } 
-      });
-      
-      const source = audioContext.createMediaStreamSource(stream);
-      const analyser = audioContext.createAnalyser();
-      analyser.fftSize = 1024;
-      analyser.smoothingTimeConstant = 0.3;
-      
-      source.connect(analyser);
-      
-      audioRef.current = {
-        ...audioRef.current,
-        audioContext,
-        analyser,
-        dataArray: new Uint8Array(analyser.frequencyBinCount),
-      };
-      
-      setIsStarted(true);
-      setDebug('Microphone active');
-    } catch (err) {
-      console.error('Error accessing microphone:', err);
-      setDebug('Microphone error: ' + err.message);
-      setIsInitializing(false);
-    }
-  };
+    setAudioContext(audioCtx)
+    setAnalyser(analyserNode);  
+  }, [])
 
   useEffect(() => {
-    requestAnimationFrame(animate);
-    return () => {
-      // Cleanup audio context on unmount
-      if (audioRef.current.audioContext) {
-        audioRef.current.audioContext.close();
+    if (!analyser || !canvasRef.current) return;
+
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    let { baseRadius, lastFrame, fps, hue1, hue2 } = audioRef.current;
+    const centerX = width / 2;
+    const centerY = height / 2;
+
+    function isAudioActive(samples, threshold = 100) {
+      // Check first few samples only
+      for (let i = 0; i < threshold; i++) {
+          // Detect any non-zero or non-128 (middle value) samples
+          // 128 is the center/silence point for 8-bit audio
+          if (samples[i] !== 128) {
+              return true;
+          }
       }
+      return false;
+    }
+  
+    function getVolume(audioData) {
+      let normSamples = [...audioData].map(x => x / 128 - 1);
+      let sum = 0;
+      for (let i = 0; i < normSamples.length; i++) {
+          sum += normSamples[i] * normSamples[i];
+      }
+      let volume = Math.sqrt(sum / normSamples.length) ;
+      return volume * 240;
+    }
+
+    function drawCircle(audioData) {
+      const volume = isAudioActive(audioData) ? getVolume(audioData) : 0;
+      ctx.clearRect(0, 0, width, height);
+      const gradient = ctx.createLinearGradient(0, 0, width, height);
+
+      // Increased lightness values for brighter colors
+      gradient.addColorStop(0, `hsl(${hue1}, 100%, 65%)`);  // Lightness increased to 65%
+      gradient.addColorStop(0.33, `hsl(${(hue1 + 15) % 360}, 100%, 60%)`);  // Lightness increased to 60%
+      gradient.addColorStop(0.66, `hsl(${hue2}, 100%, 65%)`);  // Lightness increased to 65%
+      
+      // Update hues for next frame
+      hue1 = (hue1 + 2) % 360;
+      hue2 = (hue2 + 2) % 360;
+
+      // Draw gradient background
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, width, height);
+
+      // Apply circular mask
+      ctx.globalCompositeOperation = 'destination-in';
+
+      let radius = baseRadius;
+      if (analyser) {
+        // Map volume (0-255) to radius adjustment (0-50)
+        const radiusAdjustment = (volume / 255) * 50;
+        radius = baseRadius + radiusAdjustment;
+      }
+
+      // Draw circle in the center
+      ctx.beginPath();
+      ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
+      ctx.fill();
+      
+      // Reset composite operation
+      ctx.globalCompositeOperation = 'source-over';
+          
+      // Continue animation
+      requestAnimationFrame(animate);
+    }
+
+    function animate(timestamp) {
+      if (!analyser) return;
+      const audioData = new Uint8Array(analyser.fftSize);
+      analyser.getByteTimeDomainData(audioData);
+
+      if (timestamp - lastFrame > 1000/fps) {
+        drawCircle(audioData);
+
+        lastFrame = timestamp;
+      }
+
+      animationRef.current = requestAnimationFrame(animate);
+    }
+
+    animate()
+
+    return () => {
+      cancelAnimationFrame(animationRef.current);
     };
-  }, []);
+  }, [analyser])
 
   function openWebSocketConnection() {
     const ws_url = 'ws://localhost:8000/listen';
@@ -165,7 +155,7 @@ function App() {
         if (message.type === 'transcript_final' && isAudioPlaying()) {
           skipCurrentAudio();
         }
-        dispatch(message);
+        // dispatch(message);
       }
     }
     
@@ -178,7 +168,8 @@ function App() {
     };
 
     wsRef.current.onclose = () => {
-      endConversation();
+      // endConversation();
+      console.log('close?')
     }
   }
 
@@ -189,8 +180,8 @@ function App() {
   }
 
   async function startMicrophone() {
-
     try {
+      // await audioContext.resume();
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       mediaRecorderRef.current = new MediaRecorder(stream);
       const source = audioContext.createMediaStreamSource(stream);
@@ -207,18 +198,56 @@ function App() {
   }
 
   function stopMicrophone() {
-    if (audioContext) {
-      audioContext.close()
-    }    
-
     if (mediaRecorderRef.current && mediaRecorderRef.current.stream) {
       mediaRecorderRef.current.stop();
       mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
     }
   }
 
+  function startAudioPlayer() {
+    // Initialize MediaSource and event listeners
+    mediaSourceRef.current = getMediaSource();
+    if (!mediaSourceRef.current) {
+      return;
+    }
+    
+    mediaSourceRef.current.addEventListener('sourceopen', () => {
+      if (!MediaSource.isTypeSupported('audio/mpeg')) return;
+      
+      sourceBufferRef.current = mediaSourceRef.current.addSourceBuffer('audio/mpeg');
+      sourceBufferRef.current.addEventListener('updateend', () => {
+        if (audioDataRef.current.length > 0 && !sourceBufferRef.current.updating) {
+          sourceBufferRef.current.appendBuffer(audioDataRef.current.shift());
+        }
+      });
+    });
+
+    // Initialize Audio Element
+    const audioUrl = URL.createObjectURL(mediaSourceRef.current);
+    console.log('audioUrl', audioUrl);
+    audioElementRef.current = new Audio(audioUrl);
+    console.log('1')
+    const playPromise = audioElementRef.current.play();
+  }
+
+  function isAudioPlaying() {
+    return audioElementRef.current.readyState === HTMLMediaElement.HAVE_ENOUGH_DATA;
+  }
+
+  function skipCurrentAudio() {
+    audioDataRef.current = [];
+    const buffered = sourceBufferRef.current.buffered;
+    if (buffered.length > 0) {
+      if (sourceBufferRef.current.updating) {
+        sourceBufferRef.current.abort();
+      }
+      audioElementRef.current.currentTime = buffered.end(buffered.length - 1);
+    }
+  }
+
   function stopAudioPlayer() {
     if (audioElementRef.current) {
+      console.log('2')
       audioElementRef.current.pause();
       URL.revokeObjectURL(audioElementRef.current.src);
       audioElementRef.current = null;
@@ -240,7 +269,7 @@ function App() {
     try {
       openWebSocketConnection();
       await startMicrophone();
-      // startAudioPlayer();
+      startAudioPlayer();
       setIsRunning(true);
       setIsListening(true);
     } catch (err) {
@@ -259,11 +288,6 @@ function App() {
 
   return (
     <div className="flex flex-col min-h-screen m-0">
-      {/* Fixed Header */}
-      <header className="fixed top-0 w-full z-50 p-4">
-        <h1 className="text-3xl font-bold text-center text-gray-800">Voice Assistant with Deepgram</h1>
-      </header>
-
       {/* Main Content */}
       <main className="flex-grow flex flex-col justify-center items-center mt-20 mb-16">
         <canvas ref={canvasRef} width="300" height="300" />
@@ -272,7 +296,7 @@ function App() {
       {/* Fixed Footer */}
       <footer className="fixed bottom-0 w-full z-50 p-4">
         <button
-          className="w-full py-3 px-6 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors text-lg font-semibold"
+          className={`w-full py-3 px-6 ${isRunning ? 'bg-red-500 hover:bg-red-600' : 'bg-blue-500 hover:bg-blue-600'} text-white rounded-lg transition-colors text-lg font-semibold`}
           onClick={isRunning ? endConversation : startConversation}
         >
           {isRunning ? 'End conversation' : 'Start conversation'}
@@ -280,6 +304,18 @@ function App() {
       </footer>
     </div>
   )
+}
+
+function getMediaSource() {
+  if ('MediaSource' in window) {
+    return new MediaSource();
+  } else if ('ManagedMediaSource' in window) {
+    // Use ManagedMediaSource if available in iPhone
+    return new ManagedMediaSource();
+  } else {
+    console.log('No MediaSource API available');
+    return null;
+  }
 }
 
 export default App

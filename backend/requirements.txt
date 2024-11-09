@@ -1,0 +1,16 @@
+fastapi==0.115.4
+langchain==0.3.7
+langchain-anthropic==0.2.4
+langchain-core==0.3.15
+langsmith==0.1.141
+langgraph==0.2.45
+pydantic==2.9.2
+requests==2.32.3
+starlette==0.41.2
+tenacity==9.0.0
+typing_extensions==4.12.2
+urllib3==2.2.3
+yarl==1.17.1
+deepgram-sdk==3.7.6
+google-search-results==2.4.2
+python-dotenv==1.0.1
