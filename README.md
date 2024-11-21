@@ -1,6 +1,6 @@
 # Building OpenAI Advanced Voice Mode Clone with LangGraph, Deepgram, Claude and Amazon Polly
 
-![phoenix-on-aws-ecs-fargate-arch](./assets/voice.jpg)
+![phoenix-on-aws-ecs-fargate-arch](./assets/arch.jpg)
 
 This repository contains a step-by-step guide for building an OpenAI Advanced Voice Mode Clone with LangGraph, Deepgram, Claude and Amazon Polly. The concepts in this respository are applicable to any situation where you want to add voice capability. However, note that the configuration we used for resources in this post, such as Amazon Elastic Load Balancer (Amazon ELB), Amazon Elastic Container Registry (Amazon ECR), etc., are not suitable for production use as-is. You would need a thorough security review if you plan to take the concepts to your production environment.
 
