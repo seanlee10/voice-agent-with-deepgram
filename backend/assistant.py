@@ -4,37 +4,54 @@ import os
 import httpx
 import re
 import string
-import json
+import boto3
+import base64
 from starlette.websockets import WebSocketDisconnect, WebSocketState
 from deepgram import (
     DeepgramClient, DeepgramClientOptions, LiveTranscriptionEvents, LiveOptions
 )
 from dotenv import load_dotenv
+from contextlib import closing
+
 
 load_dotenv()
 # from app.config import settings
 from graph import create_app
 # from app.types import Order
 
+AWS_ACCESS_KEY_ID = os.environ["AWS_ACCESS_KEY_ID"]
+AWS_SECRET_ACCESS_KEY = os.environ["AWS_SECRET_ACCESS_KEY"]
 DEEPGRAM_API_KEY = os.environ["DEEPGRAM_API_KEY"]
 DEEPGRAM_TTS_URL = 'https://api.deepgram.com/v1/speak?model=aura-luna-en'
 SYSTEM_PROMPT = """You are a helpful and enthusiastic assistant. Speak in a human, conversational tone.
 Keep your answers as short and concise as possible, like in a conversation, ideally no more than 120 characters.
 """
 
+language = "en"
+voice_config = {
+    'en': 'Ruth',
+    'ko': 'Seoyeon'
+}
+
 deepgram_config = DeepgramClientOptions(options={'keepalive': 'true'})
 deepgram = DeepgramClient(config=deepgram_config)
 dg_connection_options = LiveOptions(
     model='nova-2',
-    language='en',
+    language=language,
     # Apply smart formatting to the output
     smart_format=True,
     # To get UtteranceEnd, the following must be set:
-    interim_results=True,
-    utterance_end_ms='1000',
+    # interim_results=True,
+    # utterance_end_ms='1000',
     vad_events=True,
     # Time in milliseconds of silence to wait for before finalizing speech
     endpointing=500,
+)
+
+polly = boto3.client('polly', 
+    region_name='ap-northeast-2',  # Change this to your region
+    aws_access_key_id=AWS_ACCESS_KEY_ID,
+    aws_secret_access_key=AWS_SECRET_ACCESS_KEY
 )
 
 
@@ -51,7 +68,6 @@ class Assistant:
         self.app = create_app()
     
     async def assistant_chat(self, messages):
-        # chain = prompt | llm | (lambda x: x.content)
         res = self.app.invoke({
             'messages': messages,
         })
@@ -64,15 +80,59 @@ class Assistant:
     
     async def text_to_speech(self, text):
         print("text_to_speech", text)
-        headers = {
-            'Authorization': f'Token {DEEPGRAM_API_KEY}',
-            'Content-Type': 'application/json'
-        }
-        async with self.httpx_client.stream(
-            'POST', DEEPGRAM_TTS_URL, headers=headers, json={'text': text}
-        ) as res:
-            async for chunk in res.aiter_bytes(1024):
-                await self.websocket.send_bytes(chunk)
+
+        response = polly.synthesize_speech(
+            Text=text,
+            OutputFormat='mp3',
+            VoiceId=voice_config[language],
+            Engine='neural'  # Use neural engine for better quality
+        )
+
+        try:
+            stream = response["AudioStream"]
+
+            with closing(stream) as stream:
+                # Send MP3 header information first
+                chunk = stream.read(1024)  # Read first chunk including headers
+                if chunk:
+                    await self.websocket.send_json({
+                        'type': 'audio_start',
+                        'format': 'mp3',
+                        'chunk': base64.b64encode(chunk).decode('utf-8')
+                    })
+                
+                # Stream the rest of the audio
+                while True:
+                    chunk = stream.read(8192)  # Standard MP3 chunk size
+                    if not chunk:
+                        break
+                    
+                    # Send chunk as base64 encoded string
+                    await self.websocket.send_json({
+                        'type': 'audio_chunk',
+                        'chunk': base64.b64encode(chunk).decode('utf-8')
+                    })
+                    
+                    # Small delay to prevent overwhelming the client
+                    await asyncio.sleep(0.01)
+            
+            # Send end marker
+            await self.websocket.send_json({'type': 'audio_end'})
+        except Exception as e:
+            await self.websocket.send_json({
+                'type': 'error',
+                'message': str(e)
+            })
+            
+        # headers = {
+        #     'Authorization': f'Token {DEEPGRAM_API_KEY}',
+        #     'Content-Type': 'application/json'
+        # }
+        # async with self.httpx_client.stream(
+        #     'POST', DEEPGRAM_TTS_URL, headers=headers, json={'text': text}
+        # ) as res:
+        #     async for chunk in res.aiter_bytes(1024):
+        #         await self.websocket.send_bytes(chunk)
     
     async def transcribe_audio(self):
         async def on_message(self_handler, result, **kwargs):
@@ -122,7 +182,8 @@ class Assistant:
 
                 self.chat_messages.append({'role': 'user', 'content': transcript['content']})
                 response = await self.assistant_chat(
-                    [self.system_message] + self.chat_messages[-self.memory_size:]
+                    # [self.system_message] + self.chat_messages[-self.memory_size:]
+                    self.chat_messages[-self.memory_size:]
                 )
 
                 ai_text = response["messages"][-1].content

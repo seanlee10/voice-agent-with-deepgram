@@ -13,16 +13,9 @@ import os
 
 load_dotenv()
 
-
 llm = ChatAnthropic(
     model="claude-3-5-haiku-latest"
 )
-
-# llm = ChatAnthropic(
-#     model="grok-beta",
-#     base_url="https://api.x.ai",
-#     api_key=os.environ["XAI_API_KEY"]
-# )
 
 def agent_node(state, agent, name):
     print("state", state)
