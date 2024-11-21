@@ -4,7 +4,6 @@ function App() {
   const [isRunning, setIsRunning] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [audioContext, setAudioContext] = useState(null);
-  const [initializing, setIsInitializing] = useState(false);
   const [analyser, setAnalyser] = useState(null);
   const wsRef = useRef(null);
   const canvasRef = useRef(null);
@@ -31,14 +30,28 @@ function App() {
   });
 
   useEffect(() => {
-    let audioCtx, analyserNode;
+    
 
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    analyserNode = audioCtx.createAnalyser();
-    analyserNode.fftSize = 1024;
+    navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
+      let audioCtx, analyserNode;
 
-    setAudioContext(audioCtx)
-    setAnalyser(analyserNode);  
+      audioCtx = new AudioContext();
+      analyserNode = audioCtx.createAnalyser();
+      analyserNode.fftSize = 1024;
+
+      mediaRecorderRef.current = new MediaRecorder(stream);
+      const source = audioCtx.createMediaStreamSource(stream);
+      source.connect(analyserNode);
+      mediaRecorderRef.current.addEventListener('dataavailable', e => {
+        if (e.data.size > 0 && wsRef.current.readyState == WebSocket.OPEN) {
+          wsRef.current.send(e.data);
+        }
+      });
+
+      setAudioContext(audioCtx)
+      setAnalyser(analyserNode);  
+    });
+    
   }, [])
 
   useEffect(() => {
@@ -49,18 +62,6 @@ function App() {
     let { baseRadius, lastFrame, fps, hue1, hue2 } = audioRef.current;
     const centerX = width / 2;
     const centerY = height / 2;
-
-    function isAudioActive(samples, threshold = 100) {
-      // Check first few samples only
-      for (let i = 0; i < threshold; i++) {
-          // Detect any non-zero or non-128 (middle value) samples
-          // 128 is the center/silence point for 8-bit audio
-          if (samples[i] !== 128) {
-              return true;
-          }
-      }
-      return false;
-    }
   
     function getVolume(audioData) {
       let normSamples = [...audioData].map(x => x / 128 - 1);
@@ -68,12 +69,12 @@ function App() {
       for (let i = 0; i < normSamples.length; i++) {
           sum += normSamples[i] * normSamples[i];
       }
-      let volume = Math.sqrt(sum / normSamples.length) ;
+      let volume = Math.sqrt(sum / normSamples.length);
       return volume * 240;
     }
 
     function drawCircle(audioData) {
-      const volume = isAudioActive(audioData) ? getVolume(audioData) : 0;
+      const volume = getVolume(audioData);
       ctx.clearRect(0, 0, width, height);
       const gradient = ctx.createLinearGradient(0, 0, width, height);
 
@@ -94,11 +95,10 @@ function App() {
       ctx.globalCompositeOperation = 'destination-in';
 
       let radius = baseRadius;
-      if (analyser) {
-        // Map volume (0-255) to radius adjustment (0-50)
-        const radiusAdjustment = (volume / 255) * 50;
-        radius = baseRadius + radiusAdjustment;
-      }
+      // Removed conditional to always apply volume effect
+      // Map volume (0-255) to radius adjustment (0-50)
+      const radiusAdjustment = (volume / 255) * 50;
+      radius = baseRadius + radiusAdjustment;
 
       // Draw circle in the center
       ctx.beginPath();
@@ -107,8 +107,7 @@ function App() {
       
       // Reset composite operation
       ctx.globalCompositeOperation = 'source-over';
-          
-      // Continue animation
+
       requestAnimationFrame(animate);
     }
 
@@ -119,14 +118,13 @@ function App() {
 
       if (timestamp - lastFrame > 1000/fps) {
         drawCircle(audioData);
-
         lastFrame = timestamp;
       }
 
       animationRef.current = requestAnimationFrame(animate);
     }
 
-    animate()
+    animate();
 
     return () => {
       cancelAnimationFrame(animationRef.current);
@@ -158,18 +156,36 @@ function App() {
         // dispatch(message);
       }
     }
+
+    function handleAudioChunk(base64Chunk) {
+      // Convert base64 to binary
+      const binaryChunk = atob(base64Chunk);
+      const bytes = new Uint8Array(binaryChunk.length);
+      for (let i = 0; i < binaryChunk.length; i++) {
+          bytes[i] = binaryChunk.charCodeAt(i);
+      }
+      
+      // Add chunk to stack
+      audioDataRef.current.push(bytes);
+      if (sourceBufferRef.current && !sourceBufferRef.current.updating) {
+        sourceBufferRef.current.appendBuffer(audioDataRef.current.shift());
+      }
+  }
     
     wsRef.current.onmessage = (event) => {
-      if (event.data instanceof ArrayBuffer) {
+      const data = JSON.parse(event.data); 
+      if (event.data instanceof ArrayBuffer) {        
         handleAudioStream(event.data);
+      } else if (['audio_start', 'audio_chunk'].includes(data.type)) {
+        handleAudioChunk(data.chunk)
       } else {
         handleJsonMessage(event.data);
       }
     };
 
     wsRef.current.onclose = () => {
-      // endConversation();
-      console.log('close?')
+      endConversation();
+      console.log('onclose')
     }
   }
 
@@ -181,16 +197,6 @@ function App() {
 
   async function startMicrophone() {
     try {
-      // await audioContext.resume();
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      mediaRecorderRef.current = new MediaRecorder(stream);
-      const source = audioContext.createMediaStreamSource(stream);
-      source.connect(analyser);
-      mediaRecorderRef.current.addEventListener('dataavailable', e => {
-        if (e.data.size > 0 && wsRef.current.readyState == WebSocket.OPEN) {
-          wsRef.current.send(e.data);
-        }
-      });
       mediaRecorderRef.current.start(250);
     } catch (err) {
       console.error("Error accessing the microphone", err);
@@ -198,9 +204,9 @@ function App() {
   }
 
   function stopMicrophone() {
-    if (mediaRecorderRef.current && mediaRecorderRef.current.stream) {
+    if (mediaRecorderRef.current) {
       mediaRecorderRef.current.stop();
-      mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
+      // mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
     }
   }
 
@@ -224,9 +230,7 @@ function App() {
 
     // Initialize Audio Element
     const audioUrl = URL.createObjectURL(mediaSourceRef.current);
-    console.log('audioUrl', audioUrl);
     audioElementRef.current = new Audio(audioUrl);
-    console.log('1')
     const playPromise = audioElementRef.current.play();
   }
 
